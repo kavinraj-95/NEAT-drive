@@ -313,45 +313,9 @@ def run(config_file):
         
         # We manually loop for the remaining generations
         for i in range(generations_left):
-            
             # Run for ONE generation
-            # This will call eval_genomes and update p.statistics
             p.run(eval_genomes, 1)
             
-            # Get the best genome *so far*
-            current_best_genome = stats.best_genome()
-            
-            if not current_best_genome:
-                print(f"Generation {p.generation}: No best genome found, skipping graph.")
-                continue
-
-            # --- Visualize the best genome of this generation ---
-            gen_num = p.generation - 1 # p.run increments generation *after* running
-            gv_filename = os.path.join(graph_dir, f"gen-{gen_num}-net.gv")
-            img_filename = os.path.join(graph_dir, f"gen-{gen_num}-net.png")
-            
-            try:
-                # Create the .gv file
-                visualize.draw_net(config, current_best_genome, True, 
-                                   node_names=node_names, 
-                                   filename=gv_filename)
-                
-                # Render the .gv file to .png
-                import graphviz
-                s = graphviz.Source.from_file(gv_filename)
-                s.format = 'png'
-                s.render(view=False, cleanup=True) # cleanup=True removes the .gv file
-                
-                # Rename the output file
-                if os.path.exists(f"{gv_filename}.png"):
-                    os.rename(f"{gv_filename}.png", img_filename)
-                    print(f"Saved graph for generation {gen_num} to {img_filename}")
-                
-            except Exception as e:
-                print(f"Failed to render graph for gen {gen_num}: {e}")
-                print(f"You can still view the graph by opening '{gv_filename}'")
-        
-        # After the loop, get the final best genome
         winner = stats.best_genome()
         print('\nBest genome (from stats):\n{!s}'.format(winner))
 
@@ -429,7 +393,7 @@ if __name__ == "__main__":
     local_dir = os.path.dirname(__file__) 
     config_path = os.path.join(local_dir, "config-feedforward.txt")  
     
-    TRAIN = False
+    TRAIN = True
 
     if TRAIN:
         run(config_path)
