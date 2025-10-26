@@ -1,2 +1,3 @@
 venv/
 winner-genome.pkl
+neat-checkpoint-*

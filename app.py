@@ -1,14 +1,25 @@
-import os, math, random, pygame, neat, pickle 
+import os, math, pygame, neat, pickle 
 from pygame import Vector2
+import glob # For finding checkpoint files
+from neat import Checkpointer # For saving/loading population state
 
 TRACK = 'data/track.png'
 WINDOW_SIZE = (600, 400)
-MAX_STEPS_PER_CAR = 2000
+MAX_STEPS_PER_CAR = 4000
 RAY_COUNT = 6                                           # calculates distance from 6 directions
 RAY_LENGTH = 120   
 CHECK_STEPS = 120       # Check if car is stuck every 120 steps (2 seconds)
-MIN_DISPLACEMENT = 10.0 # Car must move at least 10 pixels in that time
+MIN_DISPLACEMENT = 40.0 # Car must move at least 10 pixels in that time
 TILE_SIZE = 20          # Size of the "exploration" grid tiles
+
+# --- Checkpoint & Reward Constants ---
+START_POS = (450, 373) 
+FINISH_LINE_RECT = pygame.Rect(START_POS[0] - 5, START_POS[1] - 25, 10, 50) 
+CHECKPOINT_1_POS = (279, 149) 
+CHECKPOINT_1_RECT = pygame.Rect(CHECKPOINT_1_POS[0] - 5, CHECKPOINT_1_POS[1] - 30, 10, 60)
+LAP_REWARD_BASE = 50000.0 # Base reward for a lap, divided by steps
+# --- End Constants ---
+
 
 pygame.init()
 screen = pygame.display.set_mode(WINDOW_SIZE)
@@ -44,6 +55,14 @@ class Car:
         start_tile = (int(self.pos.x / TILE_SIZE), int(self.pos.y / TILE_SIZE))
         self.visited_tiles.add(start_tile)
 
+        # --- Lap tracking attributes ---
+        self.on_finish_line = True  # Start on the finish line
+        self.lap_count = 0
+        self.steps_at_lap_start = 0
+        self.total_lap_bonus = 0.0
+        self.passed_checkpoint_1 = False # Flag to track checkpoint
+        # --- End lap tracking ---
+
 
     def update(self, steer, accel):
         if not self.alive:
@@ -59,14 +78,48 @@ class Car:
         dir_vec = Vector2(math.sin(math.radians(self.angle)), -math.cos(math.radians(self.angle)))
         self.pos += dir_vec * self.speed
 
-        # self.distance_travelled += abs(self.speed) # <-- CHANGE THIS
-        self.distance_travelled += self.speed        # <-- TO THIS (Punishes reversing)
+        self.distance_travelled += self.speed
         
         self.steps += 1 
         self.steps_since_last_check += 1
 
         current_tile = (int(self.pos.x / TILE_SIZE), int(self.pos.y / TILE_SIZE))
         self.visited_tiles.add(current_tile)
+
+        # --- Lap completion logic --- 
+        colliding_finish = FINISH_LINE_RECT.collidepoint(self.pos.x, self.pos.y)
+        colliding_checkpoint_1 = CHECKPOINT_1_RECT.collidepoint(self.pos.x, self.pos.y)
+
+        # 1. Check if car hits the checkpoint
+        if colliding_checkpoint_1 and not self.on_finish_line:
+            self.passed_checkpoint_1 = True
+
+        # 2. Check if car hits the finish line *after* hitting the checkpoint
+        if colliding_finish and not self.on_finish_line and self.passed_checkpoint_1:
+            # Just crossed the finish line to complete a lap
+            self.lap_count += 1
+            self.on_finish_line = True
+            
+            # Calculate bonus
+            steps_for_lap = self.steps - self.steps_at_lap_start
+            if steps_for_lap > 0: # Avoid divide by zero
+                bonus = LAP_REWARD_BASE  
+                self.total_lap_bonus += bonus
+
+            # Reset timer for the next lap
+            self.steps_at_lap_start = self.steps
+            
+            # Reset checkpoint for the next lap
+            self.passed_checkpoint_1 = False 
+
+        # 3. Check if car just left the finish line
+        elif not colliding_finish and self.on_finish_line:
+            # Just left the finish line
+            self.on_finish_line = False
+            # If this is the very first time leaving, set the lap start time
+            if self.lap_count == 0 and self.steps > 0:
+                self.steps_at_lap_start = self.steps
+        # --- End lap logic ---
 
         if self.steps > MAX_STEPS_PER_CAR:
             self.alive = False
@@ -77,7 +130,9 @@ class Car:
                 self.alive = False # Kill car if it's stuck or circling
             
             self.steps_since_last_check = 0
-            self.last_check_pos = Vector2(self.pos.x, self.pos.y)        # collision checks -> Use bounding box for the car
+            self.last_check_pos = Vector2(self.pos.x, self.pos.y)        
+            
+        # collision checks -> Use bounding box for the car
         corners = [
                 self.pos + Vector2(0, -9).rotate(self.angle),
                 self.pos + Vector2(5, 9).rotate(self.angle),
@@ -92,17 +147,14 @@ class Car:
 
 
     def cast_rays(self):
-
         readings = []
         start = self.pos
         base_angle = self.angle
         spread = 120
 
         for i in range(RAY_COUNT):
+            ray_angle = base_angle - spread / 2 + (spread / (RAY_COUNT - 1)) * i 
             
-            ray_angle = base_angle - spread / 2 + (spread / (RAY_COUNT - 1)) * i # Removing crookedness in the eye of the car
-            
-            # Fix for divide-by-zero if RAY_COUNT = 1
             if RAY_COUNT == 1:
                 ray_angle = base_angle
                 
@@ -128,7 +180,7 @@ class Car:
             if not hit:
                 dist = RAY_LENGTH
 
-            readings.append(dist / RAY_LENGTH)      # Normalise it so it lies between [0, 1] and append readings
+            readings.append(dist / RAY_LENGTH)
 
         return readings
 
@@ -158,7 +210,7 @@ def eval_genomes(genomes, config):
     for genome_id, genome in genomes:
         net = neat.nn.FeedForwardNetwork.create(genome, config)
         nets.append(net)
-        cars.append(Car(start_pos=(450, 373), start_angle=0.0))
+        cars.append(Car(start_pos=START_POS, start_angle=0.0)) 
         genome.fitness = 0
 
     run = True
@@ -169,6 +221,9 @@ def eval_genomes(genomes, config):
                 quit()
 
         screen.blit(track_surf, (0, 0))
+
+        pygame.draw.rect(screen, (0, 255, 0), FINISH_LINE_RECT, 2) 
+        pygame.draw.rect(screen, (255, 0, 0), CHECKPOINT_1_RECT, 2) 
         
         for i, car in enumerate(cars):
             if not car.alive:
@@ -179,21 +234,59 @@ def eval_genomes(genomes, config):
             steer, accel = outputs[0], outputs[1]
             car.update(steer, accel)
             car.draw(screen)
-            genomes[i][1].fitness = len(car.visited_tiles) * 100 + car.distance_travelled
+            
+            genomes[i][1].fitness = len(car.visited_tiles) * 100 + car.distance_travelled + car.total_lap_bonus
 
         pygame.display.flip()
         clock.tick(60)
 
 def run(config_file):
+    TOTAL_GENERATIONS = 40
+
     config = neat.Config(neat.DefaultGenome, neat.DefaultReproduction, neat.DefaultSpeciesSet, neat.DefaultStagnation, config_file)
-    p = neat.Population(config)
+    
+    # --- Check for existing checkpoints ---
+    latest_checkpoint = None
+    checkpoint_files = glob.glob('neat-checkpoint-*') # Find all checkpoint files
+    if checkpoint_files:
+        # Sort files by generation number (e.g., neat-checkpoint-9)
+        checkpoint_files.sort(key=lambda f: int(f.split('-')[-1]))
+        latest_checkpoint = checkpoint_files[-1]
+        
+    if latest_checkpoint:
+        print(f"*** Resuming training from checkpoint: {latest_checkpoint} ***")
+        p = Checkpointer.restore_checkpoint(latest_checkpoint)
+    else:
+        print("*** Starting new training session ***")
+        p = neat.Population(config)
+    
+
+    # Add reporters
     p.add_reporter(neat.StdOutReporter(True))
     stats = neat.StatisticsReporter()
     p.add_reporter(stats)
+    
+    # This will save a checkpoint every 5 generations
+    checkpointer = Checkpointer(generation_interval=5, 
+                                time_interval_seconds=None, 
+                                filename_prefix='neat-checkpoint-')
+    p.add_reporter(checkpointer)
+    
 
-    winner = p.run(eval_genomes, 50)
-    print('\nBest genome:\n{!s}'.format(winner)) 
 
+    generations_left = TOTAL_GENERATIONS - p.generation
+    
+    if generations_left > 0:
+        print(f"--- Running for {generations_left} more generations (Current: {p.generation}, Target: {TOTAL_GENERATIONS}) ---")
+        winner = p.run(eval_genomes, generations_left)
+        print('\nBest genome:\n{!s}'.format(winner))
+    else:
+        print(f"--- Already trained for {p.generation} generations. ---")
+        winner = p.best_genome 
+        print('\nBest genome (from loaded checkpoint):\n{!s}'.format(winner))
+
+
+    # Save the winner genome 
     with open('winner-genome.pkl', 'wb') as f:
         pickle.dump(winner, f)
 
@@ -201,18 +294,15 @@ def run_winner(config, genome_path="winner-genome.pkl"):
     """
     Load a saved genome and run it in the simulation.
     """
-    # Load the NEAT config
+
     config = neat.Config(neat.DefaultGenome, neat.DefaultReproduction, neat.DefaultSpeciesSet, neat.DefaultStagnation, config)
 
-    # Load the saved genome
     with open(genome_path, 'rb') as f:
         genome = pickle.load(f)
     
-    # Create the neural network from the genome
     net = neat.nn.FeedForwardNetwork.create(genome, config)
     
-    # Create one car
-    car = Car(start_pos=(450, 373), start_angle=0.0)
+    car = Car(start_pos=START_POS, start_angle=0.0) 
 
     run = True
     while run and car.alive:
@@ -222,6 +312,9 @@ def run_winner(config, genome_path="winner-genome.pkl"):
                 quit()
 
         screen.blit(track_surf, (0, 0))
+        # Draw the finish line and checkpoint
+        pygame.draw.rect(screen, (0, 255, 0), FINISH_LINE_RECT, 2) 
+        pygame.draw.rect(screen, (255, 0, 0), CHECKPOINT_1_RECT, 2) 
         
         # Get inputs for the car
         inputs = car.cast_rays()
@@ -242,10 +335,9 @@ if __name__ == "__main__":
     local_dir = os.path.dirname(__file__) 
     config_path = os.path.join(local_dir, "config-feedforward.txt")  
     
-    TRAIN = False
+    TRAIN = False 
 
     if TRAIN:
         run(config_path)
     else:
-        # This runs the saved winner
         run_winner(config_path, "winner-genome.pkl")
