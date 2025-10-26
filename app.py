@@ -1,8 +1,8 @@
-import os, math, pygame, neat, pickle 
+import os, math, pygame, neat, pickle, visualize, argparse
 from pygame import Vector2
 import glob # For finding checkpoint files
 from neat import Checkpointer # For saving/loading population state
-import visualize
+
 
 TRACK = 'data/track.png'
 WINDOW_SIZE = (600, 400)
@@ -393,9 +393,18 @@ if __name__ == "__main__":
     local_dir = os.path.dirname(__file__) 
     config_path = os.path.join(local_dir, "config-feedforward.txt")  
     
-    TRAIN = True
+    parser = argparse.ArgumentParser(description = "Run NEAT car training or simulation.")
+    parser.add_argument(
+        "--train",
+        action = "store_true",  
+        help = "If set, run the training process. Otherwise, run the best winner."
+    )
+    args = parser.parse_args()
+    
 
-    if TRAIN:
+    if args.train: 
+        print("--- Starting in TRAINING mode ---")
         run(config_path)
-    else:
+    else: 
+        print("--- Starting in TESTING mode ---")
         run_winner(config_path, "winner-genome.pkl")
