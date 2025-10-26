@@ -2,12 +2,13 @@ import os, math, pygame, neat, pickle
 from pygame import Vector2
 import glob # For finding checkpoint files
 from neat import Checkpointer # For saving/loading population state
+import visualize
 
 TRACK = 'data/track.png'
 WINDOW_SIZE = (600, 400)
-MAX_STEPS_PER_CAR = 4000
-RAY_COUNT = 6                                           # calculates distance from 6 directions
-RAY_LENGTH = 120   
+MAX_STEPS_PER_CAR = 50000000
+RAY_COUNT = 9                                           # calculates distance from 6 directions
+RAY_LENGTH = 250   
 CHECK_STEPS = 120       # Check if car is stuck every 120 steps (2 seconds)
 MIN_DISPLACEMENT = 40.0 # Car must move at least 10 pixels in that time
 TILE_SIZE = 20          # Size of the "exploration" grid tiles
@@ -46,7 +47,7 @@ class Car:
         self.distance_travelled = 0.0
         self.steps = 0 
         self.max_speed = 4.0
-        self.size = (10, 18)
+        self.size = (20, 36)
 
         self.steps_since_last_check = 0
         self.last_check_pos = Vector2(start_pos)
@@ -54,6 +55,17 @@ class Car:
         self.visited_tiles = set()
         start_tile = (int(self.pos.x / TILE_SIZE), int(self.pos.y / TILE_SIZE))
         self.visited_tiles.add(start_tile)
+        try:
+            # Load the original image
+            original_image = pygame.image.load('data/car.png').convert_alpha()
+            # Scale it to the desired size
+            self.image = pygame.transform.scale(original_image, self.size)
+        except pygame.error as e:
+            print(f"Error loading 'data/car.png': {e}")
+            print("Falling back to a red rectangle.")
+            # Fallback: create a red surface if image fails to load
+            self.image = pygame.Surface(self.size, pygame.SRCALPHA)
+            self.image.fill((255, 0, 0))
 
         # --- Lap tracking attributes ---
         self.on_finish_line = True  # Start on the finish line
@@ -69,11 +81,12 @@ class Car:
             return
 
         # Steer, angle in range [-1, 1] -> tanh
-        self.angle += steer * 4.0
+        self.angle += steer * 2.5  # <-- REDUCED SENSITIVITY
+        self.angle %= 360
         self.speed += accel * 0.2
 
         # clamp speed
-        self.speed = max(0.5, min(self.speed, self.max_speed))
+        self.speed = max(0, min(self.speed, self.max_speed))
         # update position
         dir_vec = Vector2(math.sin(math.radians(self.angle)), -math.cos(math.radians(self.angle)))
         self.pos += dir_vec * self.speed
@@ -103,7 +116,7 @@ class Car:
             # Calculate bonus
             steps_for_lap = self.steps - self.steps_at_lap_start
             if steps_for_lap > 0: # Avoid divide by zero
-                bonus = LAP_REWARD_BASE  
+                bonus = LAP_REWARD_BASE / steps_for_lap
                 self.total_lap_bonus += bonus
 
             # Reset timer for the next lap
@@ -186,22 +199,16 @@ class Car:
 
 
     def draw(self, surf):
-        rect = pygame.Rect(0, 0, self.size[0], self.size[1])
-        rect.center = (self.pos.x, self.pos.y)
-        car_surf = pygame.Surface(self.size, pygame.SRCALPHA)
-        pygame.draw.rect(car_surf, (255,0,0), (0,0,self.size[0],self.size[1]))
-        rotated = pygame.transform.rotate(car_surf, self.angle)
-        rrect = rotated.get_rect(center = rect.center)
+        # Rotate the pre-loaded image
+        rotated = pygame.transform.rotate(self.image, self.angle)
+        
+        # Get the new bounding box, centered at the car's position
+        rrect = rotated.get_rect(center = self.pos)
+        
+        # Blit the rotated image onto the main surface
         surf.blit(rotated, rrect.topleft)
 
-        for i, d in enumerate(self.cast_rays()):
-            ray_angle = self.angle - 60 + (120/(RAY_COUNT-1))*i
-            rad = math.radians(ray_angle)
-            x2 = self.pos.x + math.sin(rad) * d * RAY_LENGTH
-            y2 = self.pos.y - math.cos(rad) * d * RAY_LENGTH
-            pygame.draw.line(surf, (0,255,0), (self.pos.x, self.pos.y), (x2, y2), 1)
-
-
+            
 
 # NEAT evaluation
 def eval_genomes(genomes, config):
@@ -234,14 +241,25 @@ def eval_genomes(genomes, config):
             steer, accel = outputs[0], outputs[1]
             car.update(steer, accel)
             car.draw(screen)
+            # Reduce the exploration bonus. It's now a small reward to
+            # encourage progress, not the main goal.
+            exploration_bonus = len(car.visited_tiles) * 100
             
-            genomes[i][1].fitness = len(car.visited_tiles) * 100 + car.distance_travelled + car.total_lap_bonus
+            # Make distance travelled a much larger part of the reward.
+            # Since distance = speed * time, this rewards cars that
+            # maintain a high speed for a long time.
+            speed_bonus = car.distance_travelled * 2
+            
+            # The lap bonus is already a great speed incentive, keep it.
+            lap_bonus = car.total_lap_bonus
+            
+            genomes[i][1].fitness = speed_bonus + exploration_bonus 
 
         pygame.display.flip()
         clock.tick(60)
 
 def run(config_file):
-    TOTAL_GENERATIONS = 40
+    TOTAL_GENERATIONS = 35
 
     config = neat.Config(neat.DefaultGenome, neat.DefaultReproduction, neat.DefaultSpeciesSet, neat.DefaultStagnation, config_file)
     
@@ -260,7 +278,6 @@ def run(config_file):
         print("*** Starting new training session ***")
         p = neat.Population(config)
     
-
     # Add reporters
     p.add_reporter(neat.StdOutReporter(True))
     stats = neat.StatisticsReporter()
@@ -272,18 +289,95 @@ def run(config_file):
                                 filename_prefix='neat-checkpoint-')
     p.add_reporter(checkpointer)
     
-
-
+    # --- Define node names ONCE outside the loop ---
+    node_names = {
+        -1: 'Ray 1', -2: 'Ray 2', -3: 'Ray 3', 
+        -4: 'Ray 4', -5: 'Ray 5', -6: 'Ray 6',
+        -7: 'Ray 7', -8: 'Ray 8', -9: 'Ray 9',
+        -10: 'Speed',
+         0: 'Steer',  1: 'Accel'
+    }
+    
+    # --- Create a directory for generational graphs ---
+    graph_dir = "generational-graphs"
+    if not os.path.exists(graph_dir):
+        os.makedirs(graph_dir)
+    print(f"Saving generation graphs to: {graph_dir}/")
+    
+    
     generations_left = TOTAL_GENERATIONS - p.generation
     
+    # --- NEW: Run one generation at a time ---
     if generations_left > 0:
         print(f"--- Running for {generations_left} more generations (Current: {p.generation}, Target: {TOTAL_GENERATIONS}) ---")
-        winner = p.run(eval_genomes, generations_left)
-        print('\nBest genome:\n{!s}'.format(winner))
+        
+        # We manually loop for the remaining generations
+        for i in range(generations_left):
+            
+            # Run for ONE generation
+            # This will call eval_genomes and update p.statistics
+            p.run(eval_genomes, 1)
+            
+            # Get the best genome *so far*
+            current_best_genome = stats.best_genome()
+            
+            if not current_best_genome:
+                print(f"Generation {p.generation}: No best genome found, skipping graph.")
+                continue
+
+            # --- Visualize the best genome of this generation ---
+            gen_num = p.generation - 1 # p.run increments generation *after* running
+            gv_filename = os.path.join(graph_dir, f"gen-{gen_num}-net.gv")
+            img_filename = os.path.join(graph_dir, f"gen-{gen_num}-net.png")
+            
+            try:
+                # Create the .gv file
+                visualize.draw_net(config, current_best_genome, True, 
+                                   node_names=node_names, 
+                                   filename=gv_filename)
+                
+                # Render the .gv file to .png
+                import graphviz
+                s = graphviz.Source.from_file(gv_filename)
+                s.format = 'png'
+                s.render(view=False, cleanup=True) # cleanup=True removes the .gv file
+                
+                # Rename the output file
+                if os.path.exists(f"{gv_filename}.png"):
+                    os.rename(f"{gv_filename}.png", img_filename)
+                    print(f"Saved graph for generation {gen_num} to {img_filename}")
+                
+            except Exception as e:
+                print(f"Failed to render graph for gen {gen_num}: {e}")
+                print(f"You can still view the graph by opening '{gv_filename}'")
+        
+        # After the loop, get the final best genome
+        winner = stats.best_genome()
+        print('\nBest genome (from stats):\n{!s}'.format(winner))
+
     else:
         print(f"--- Already trained for {p.generation} generations. ---")
-        winner = p.best_genome 
+        winner = stats.best_genome() # Get best from stats
         print('\nBest genome (from loaded checkpoint):\n{!s}'.format(winner))
+    # --- End of new loop ---
+
+
+    # --- Save the FINAL winner ---
+    print("\nSaving final best network...")
+    visualize.draw_net(config, winner, True, 
+                            node_names=node_names, 
+                            filename="winner-net.gv")
+    
+    # (Optional) Render the final winner as well
+    try:
+        import graphviz
+        s = graphviz.Source.from_file("winner-net.gv")
+        s.format = 'png'
+        s.render(filename="winner-net", view=False, cleanup=True)
+        if os.path.exists("winner-net.png"):
+             print(f"Successfully rendered final network to winner-net.png")
+    except Exception as e:
+        print(f"Failed to render final winner: {e}")
 
 
     # Save the winner genome 
@@ -335,7 +429,7 @@ if __name__ == "__main__":
     local_dir = os.path.dirname(__file__) 
     config_path = os.path.join(local_dir, "config-feedforward.txt")  
     
-    TRAIN = False 
+    TRAIN = False
 
     if TRAIN:
         run(config_path)
