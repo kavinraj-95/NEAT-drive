@@ -5,7 +5,6 @@ img = pygame.image.load("data/track.png")
 screen = pygame.display.set_mode(img.get_size())
 screen.blit(img, (0, 0))
 pygame.display.flip()
-
 running = True
 while running:
     for event in pygame.event.get():
